@@ -37,7 +37,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from torch.utils.data import DataLoader
-from torchvision import transforms
+
+
+class Compose:
+    """Minimal stand-in for torchvision.transforms.Compose (avoids the
+    torchvision dependency, which is not needed for anything else here)."""
+
+    def __init__(self, transforms):
+        self.transforms = transforms
+
+    def __call__(self, x):
+        for t in self.transforms:
+            x = t(x)
+        return x
+
 
 # ---------------------------------------------------------------------------
 # Make the repo's text/ folder importable (this file lives in repo_root/repro/)
@@ -423,10 +436,11 @@ def main():
 
     # --- neural data ---
     assert args.decimation == 6, "only the pre-decimated (decimation=6) data is provided"
-    X = np.load(os.path.join(args.data_dir, "train_data.npy"))
-    X_te = np.load(os.path.join(args.data_dir, "realtime_test_data.npy"))
+    # cast to float32 on load to roughly halve peak RAM (the file is float64, ~11.5 GB)
+    X = np.load(os.path.join(args.data_dir, "train_data.npy")).astype(np.float32)
+    X_te = np.load(os.path.join(args.data_dir, "realtime_test_data.npy")).astype(np.float32)
     n_test = X_te.shape[0]
-    X = np.concatenate((X, X_te), axis=0).astype(np.float32)
+    X = np.concatenate((X, X_te), axis=0)
     print(f"train samples {X.shape[0] - n_test}  test samples {n_test}  X {X.shape}", flush=True)
 
     X = normalize_X(X, args.normalization_strategy)
@@ -486,13 +500,13 @@ def main():
     test_jitter = Jitter((-1, 8), (args.winstart, args.winend),
                          jitter_amt=0.0, decimation=args.decimation)
     lens[:] = train_jitter.winsize  # every trial uses the same fixed window
-    composed = transforms.Compose([
+    composed = Compose([
         train_jitter, Blackout(b1["blackout_len"], args.blackout_prob),
         AdditiveNoise(b1["additive_noise_level"]),
         LevelChannelNoise(args.chan_noise),
         ScaleAugment(b1["scale_low"], b1["scale_high"]),
     ])
-    test_augs = transforms.Compose([test_jitter])
+    test_augs = Compose([test_jitter])
 
     # --- decoders ---
     greedy = GreedyCTCDecoder(labels=list(enc_final.keys()))
