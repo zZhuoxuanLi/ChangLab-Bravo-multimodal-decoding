@@ -20,7 +20,8 @@ PY=/userdata/zli/b3env/bin/python
 DATA=/userdata/dmoses/b3_features/zenodo
 QUEUE="${QUEUE:-pia-batch.q}"   # CPU queue; beam search is CPU-bound
 CORES="${CORES:-4}"
-MEM="${MEM:-32}"                # host RAM in GB (full data load, like training)
+MEM="${MEM:-96}"                # host RAM in GB; full data load peaks ~18 GB
+                                # (float64 file + float32 copy), 96 is comfortable
 CKPT="${CKPT:-final_model.pth}" # which checkpoint to evaluate in each run dir
 
 mkdir -p "$REPO/logs"
