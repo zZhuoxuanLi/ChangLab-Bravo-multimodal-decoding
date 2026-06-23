@@ -28,6 +28,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")  # headless / server-safe
 import matplotlib.pyplot as plt
+import matplotlib.lines as mlines
 
 # nicer axis labels per metric
 METRIC_LABELS = {
@@ -37,44 +38,78 @@ METRIC_LABELS = {
     "wpms": "WPM", "speaking_times": "Speaking time (s)",
     "early_stopping": "Early-stop rate",
 }
+# body colors (match the reference plot: WER blue, WPM red)
 METRIC_COLORS = {
-    "wers": "tab:blue", "raw_wers": "tab:green", "cers": "tab:purple",
-    "pers": "tab:orange", "wpms": "tab:red", "speaking_times": "tab:brown",
+    "wers": "#2f6f9f", "raw_wers": "#3a7d44", "cers": "#7b5ea7",
+    "pers": "#d1812c", "wpms": "#b24b45", "speaking_times": "#8a6d3b",
 }
+# value-label number format per metric
+METRIC_FMT = {"wpms": "{:.1f}", "speaking_times": "{:.2f}"}
+DEFAULT_FMT = "{:.2f}"
+
+# mean/median line styling (mean = dashed gray, median = solid black)
+MEAN_COLOR = "#555555"
+MEDIAN_COLOR = "#111111"
+MEAN_DASH = (0, (5, 2))
 
 # map realtime_predictions.csv columns -> metric keys
 CSV_COLMAP = {"wer": "wers", "cer": "cers", "per": "pers", "wpm": "wpms",
               "speak_time": "speaking_times"}
 
 
-def violin_plot(ax, violin_data, violin_labels, xlabel, ylabel, title, color="blue"):
+def violin_plot(ax, violin_data, violin_labels, xlabel, ylabel, title,
+                color="#2f6f9f", value_fmt=DEFAULT_FMT):
     positions = list(range(1, len(violin_data) + 1))
     parts = ax.violinplot(violin_data, positions=positions,
                           showmeans=True, showmedians=True, showextrema=True)
 
+    # whiskers / extrema
     for partname in ("cbars", "cmins", "cmaxes"):
         vp = parts[partname]
-        vp.set_edgecolor("black")
-        vp.set_linewidth(1)
+        vp.set_edgecolor("#222222")
+        vp.set_linewidth(1.1)
 
+    # mean: dashed gray  |  median: solid black  (kept distinct on purpose)
     vp = parts["cmeans"]
-    vp.set_edgecolor(color)
-    vp.set_linewidth(2)
+    vp.set_edgecolor(MEAN_COLOR)
+    vp.set_linewidth(1.8)
+    vp.set_linestyle(MEAN_DASH)
 
     vp = parts["cmedians"]
-    vp.set_edgecolor("black")
-    vp.set_linewidth(2)
+    vp.set_edgecolor(MEDIAN_COLOR)
+    vp.set_linewidth(2.4)
 
     for pc in parts["bodies"]:
         pc.set_facecolor(color)
+        pc.set_edgecolor(color)
         pc.set_alpha(0.3)
+
+    # print the actual mean & median numbers beside each violin
+    for pos, arr in zip(positions, violin_data):
+        med = float(np.median(arr))
+        mean = float(np.mean(arr))
+        ax.annotate(value_fmt.format(med), (pos, med), textcoords="offset points",
+                    xytext=(9, -1), fontsize=8, color=MEDIAN_COLOR,
+                    ha="left", va="center", fontweight="bold")
+        ax.annotate(value_fmt.format(mean), (pos, mean), textcoords="offset points",
+                    xytext=(9, 11), fontsize=8, color=MEAN_COLOR,
+                    ha="left", va="center")
 
     ax.set_xticks(positions)
     ax.set_xticklabels(violin_labels, rotation=30, ha="right")
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    median_handle = mlines.Line2D([], [], color=MEDIAN_COLOR, linewidth=2.4,
+                                  label="median")
+    mean_handle = mlines.Line2D([], [], color=MEAN_COLOR, linewidth=1.8,
+                                linestyle=MEAN_DASH, label="mean")
+    ax.legend(handles=[median_handle, mean_handle], frameon=False,
+              loc="best", fontsize=9)
     return ax
 
 
@@ -109,6 +144,8 @@ def main():
     p.add_argument("--metrics", default="wers,wpms",
                    help="comma-separated metric keys to plot (one column each)")
     p.add_argument("--out", default="eval_plots.png")
+    p.add_argument("--title", default="",
+                   help="optional figure suptitle")
     p.add_argument("--no_sort", action="store_true",
                    help="keep input order instead of sorting by batch size")
     args = p.parse_args()
@@ -132,9 +169,9 @@ def main():
         labels = [labels[i] for i in order]
 
     # side-by-side: one column per metric
-    per_panel_w = max(5.0, len(data) * 0.8)
+    per_panel_w = max(5.5, len(data) * 0.85)
     fig, axs = plt.subplots(1, len(metrics),
-                            figsize=(per_panel_w * len(metrics), 4.8))
+                            figsize=(per_panel_w * len(metrics), 5.2))
     if len(metrics) == 1:
         axs = [axs]
 
@@ -153,13 +190,15 @@ def main():
         violin_plot(ax, vdata, vlab, "batch size",
                     METRIC_LABELS.get(metric, metric),
                     f"Distribution of {METRIC_LABELS.get(metric, metric)}",
-                    color=METRIC_COLORS.get(metric, "blue"))
-        for i, v in enumerate(vdata, start=1):
-            ax.annotate(f"{np.median(v):.2f}", (i, np.median(v)),
-                        textcoords="offset points", xytext=(9, 0), fontsize=8)
+                    color=METRIC_COLORS.get(metric, "#2f6f9f"),
+                    value_fmt=METRIC_FMT.get(metric, DEFAULT_FMT))
 
-    fig.tight_layout()
-    fig.savefig(args.out, dpi=150)
+    if args.title:
+        fig.suptitle(args.title, fontsize=14, fontweight="bold")
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+    else:
+        fig.tight_layout()
+    fig.savefig(args.out, dpi=200)
     print("wrote", args.out)
 
     # text summary
