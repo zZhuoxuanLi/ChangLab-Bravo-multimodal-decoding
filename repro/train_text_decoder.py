@@ -117,12 +117,19 @@ class AUXCnnRnnClassifier(nn.Module):
 # ===========================================================================
 # Training / evaluation helpers (no wandb)
 # ===========================================================================
-def train_one_epoch(model, loader, optimizer, device, wordct_weight, clipamt):
+def train_one_epoch(model, loader, optimizer, device, wordct_weight, clipamt,
+                    accum_steps=1):
+    """One training epoch. With accum_steps>1 the gradient is accumulated over
+    `accum_steps` micro-batches before stepping, so the *effective* batch size is
+    bs*accum_steps while peak GPU memory stays at the bs micro-batch level
+    (single-GPU way to reach a large batch)."""
     model.train()
     loss_fn = nn.CTCLoss()
     class_loss = nn.CrossEntropyLoss()
     total_loss, total_samps = 0.0, 0
-    for x, y, l, targ_len, _, wordct in loader:
+    n_batches = len(loader)
+    optimizer.zero_grad()
+    for i, (x, y, l, targ_len, _, wordct) in enumerate(loader):
         x = x.float().to(device)
         y = y.long().to(device)
         l = l.int().cpu()
@@ -130,15 +137,16 @@ def train_one_epoch(model, loader, optimizer, device, wordct_weight, clipamt):
         wordct = wordct.long().to(device)
         emissions, word_ct_pred, lengths = model(x, l)
         emissions = F.log_softmax(emissions, dim=-1)
-        optimizer.zero_grad()
         loss = loss_fn(emissions, y, lengths, targ_len)
         if wordct_weight:
             loss = loss + wordct_weight * class_loss(word_ct_pred, wordct)
         total_loss += loss.item()
         total_samps += x.shape[0]
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clipamt)
-        optimizer.step()
+        (loss / accum_steps).backward()
+        if (i + 1) % accum_steps == 0 or (i + 1) == n_batches:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clipamt)
+            optimizer.step()
+            optimizer.zero_grad()
     return total_loss / max(total_samps, 1)
 
 
@@ -188,14 +196,14 @@ def evaluate(model, loader, device, greedy, beam_search_decoder, texts, tokens,
 def train_loop(model, train_loader, val_loader, optimizer, device, texts,
                greedy, beam_search_decoder, tokens, out_dir, max_epochs=1000,
                patience=10, wercalcrate=3, start_eval=0, wordct_weight=0.0,
-               clipamt=1.0):
+               clipamt=1.0, accum_steps=1):
     best_wer = np.inf
     best_state = None
     patience_ctr = 0
     for epoch in range(max_epochs):
         t0 = time.time()
         tr_loss = train_one_epoch(model, train_loader, optimizer, device,
-                                  wordct_weight, clipamt)
+                                  wordct_weight, clipamt, accum_steps=accum_steps)
         do_text = (epoch % wercalcrate == 0 and epoch >= start_eval)
         te_loss, wer, cer, per = evaluate(
             model, val_loader, device, greedy, beam_search_decoder, texts,
@@ -395,7 +403,10 @@ def main():
     p.add_argument("--num_layers", type=int, default=3)
     p.add_argument("--dropout", type=float, default=0.4)
     p.add_argument("--feat_stream", default="both", choices=["both", "hga", "raw"])
-    p.add_argument("--bs", type=int, default=64)
+    p.add_argument("--bs", type=int, default=64,
+                   help="micro-batch size that lives on the GPU")
+    p.add_argument("--accum_steps", type=int, default=1,
+                   help="gradient-accumulation steps; effective batch = bs * accum_steps")
     p.add_argument("--weight_decay", type=float, default=1e-5)
     p.add_argument("--LM_WEIGHT", type=float, default=4.0)
     p.add_argument("--WORD_SCORE", type=float, default=-0.26)
@@ -541,11 +552,13 @@ def main():
                                       weight_decay=args.weight_decay)
 
     print("\n===== TRAINING =====", flush=True)
+    print(f"micro-batch {args.bs} x accum {args.accum_steps} "
+          f"= effective batch {args.bs * args.accum_steps}", flush=True)
     model, best_val_wer = train_loop(
         model, train_loader, val_loader, optimizer, args.device, gt_text,
         greedy, beam_train, tokens, args.out_dir, max_epochs=args.max_epochs,
         patience=args.patience, start_eval=0, wordct_weight=args.word_ct_weight,
-        clipamt=args.clipamt)
+        clipamt=args.clipamt, accum_steps=args.accum_steps)
     print(f"best validation WER (3-gram, beam {args.beam_width}): {best_val_wer:.4f}", flush=True)
     torch.save(model.state_dict(), os.path.join(args.out_dir, "final_model.pth"))
 
@@ -566,6 +579,11 @@ def main():
     median_wpm = float(np.median(res["wpms"]))
 
     summary = {
+        "batch_size": args.bs,
+        "accum_steps": args.accum_steps,
+        "effective_batch_size": args.bs * args.accum_steps,
+        "seed": args.seed,
+        "eval_set": args.eval_set,
         "best_val_wer_3gram": best_val_wer,
         "realtime_net_wer": res["net_wer"],
         "realtime_net_cer": res["net_cer"],
