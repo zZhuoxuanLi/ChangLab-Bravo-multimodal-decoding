@@ -21,6 +21,7 @@ Examples:
 import argparse
 import os
 import pickle
+import re
 
 import numpy as np
 import pandas as pd
@@ -92,6 +93,13 @@ def load_metrics(path):
     raise ValueError(f"unsupported input (need .pkl or .csv): {path}")
 
 
+def batch_key(label):
+    """Sort key: the (last) integer embedded in a label, e.g. 'bs_128' -> 128.
+    Labels without a number sort to the end, keeping their original order."""
+    nums = re.findall(r"\d+", label)
+    return int(nums[-1]) if nums else float("inf")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--inputs", nargs="+", required=True,
@@ -99,8 +107,10 @@ def main():
     p.add_argument("--labels", nargs="*", default=None,
                    help="one label per input (default: parent dir / file name)")
     p.add_argument("--metrics", default="wers,wpms",
-                   help="comma-separated metric keys to plot (one row each)")
+                   help="comma-separated metric keys to plot (one column each)")
     p.add_argument("--out", default="eval_plots.png")
+    p.add_argument("--no_sort", action="store_true",
+                   help="keep input order instead of sorting by batch size")
     args = p.parse_args()
 
     metrics = [m.strip() for m in args.metrics.split(",") if m.strip()]
@@ -115,8 +125,16 @@ def main():
             parent = os.path.basename(os.path.dirname(os.path.abspath(p_)))
             labels.append(parent if parent else os.path.splitext(os.path.basename(p_))[0])
 
-    fig, axs = plt.subplots(len(metrics), 1,
-                            figsize=(max(8, len(data) * 1.6), 3.2 * len(metrics)))
+    # order from smallest to largest batch size (by the number in each label)
+    if not args.no_sort:
+        order = sorted(range(len(labels)), key=lambda i: batch_key(labels[i]))
+        data = [data[i] for i in order]
+        labels = [labels[i] for i in order]
+
+    # side-by-side: one column per metric
+    per_panel_w = max(5.0, len(data) * 0.8)
+    fig, axs = plt.subplots(1, len(metrics),
+                            figsize=(per_panel_w * len(metrics), 4.8))
     if len(metrics) == 1:
         axs = [axs]
 
@@ -132,7 +150,7 @@ def main():
         if not vdata:
             ax.set_title(f"{metric}: no data found")
             continue
-        violin_plot(ax, vdata, vlab, "model",
+        violin_plot(ax, vdata, vlab, "batch size",
                     METRIC_LABELS.get(metric, metric),
                     f"Distribution of {METRIC_LABELS.get(metric, metric)}",
                     color=METRIC_COLORS.get(metric, "blue"))
