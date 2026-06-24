@@ -162,11 +162,18 @@ def main():
             parent = os.path.basename(os.path.dirname(os.path.abspath(p_)))
             labels.append(parent if parent else os.path.splitext(os.path.basename(p_))[0])
 
+    paths = list(args.inputs)
     # order from smallest to largest batch size (by the number in each label)
     if not args.no_sort:
         order = sorted(range(len(labels)), key=lambda i: batch_key(labels[i]))
         data = [data[i] for i in order]
         labels = [labels[i] for i in order]
+        paths = [paths[i] for i in order]
+
+    # show the resolved left->right mapping so any mislabeling is obvious
+    print("plot order (left -> right):")
+    for lab, pth in zip(labels, paths):
+        print(f"  {lab:<12} <- {pth}")
 
     # side-by-side: one column per metric
     per_panel_w = max(5.5, len(data) * 0.85)
