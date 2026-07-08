@@ -437,21 +437,20 @@ def _manifest_rows(labels, idxs):
     return rows
 
 
-def write_split_manifest(path, labels, train, val, test, meta=None):
-    """Write a lightweight JSON describing which trials are in each split
-    (index / block / within-block index / ground truth). Does NOT copy any
-    neural data -- it just lists what was used so splits can be verified and
-    compared across runs. Each split is sorted by index for stable diffs."""
-    manifest = {
-        "meta": meta or {},
-        "counts": {"train": len(train), "val": len(val), "test": len(test)},
-        "train": _manifest_rows(labels, sorted(train)),
-        "val": _manifest_rows(labels, sorted(val)),
-        "test": _manifest_rows(labels, sorted(test)),
-    }
-    with open(path, "w") as f:
-        json.dump(manifest, f, indent=2)
-    return manifest
+def write_split_manifest(out_dir, labels, train, val, test, prefix="split"):
+    """Write THREE lightweight JSON files -- one per split -- describing which
+    trials are in each (index / block / within-block index / ground truth).
+    Does NOT copy any neural data; it just lists what was used so splits can be
+    verified and compared across runs. Each file is a flat array sorted by index
+    for stable diffs. Returns {split_name: path}."""
+    os.makedirs(out_dir, exist_ok=True)
+    paths = {}
+    for name, idxs in (("train", train), ("val", val), ("test", test)):
+        p = os.path.join(out_dir, f"{prefix}_{name}.json")
+        with open(p, "w") as f:
+            json.dump(_manifest_rows(labels, sorted(idxs)), f, indent=2)
+        paths[name] = p
+    return paths
 
 
 def main():
@@ -556,20 +555,10 @@ def main():
     train, val, test, test_day_inds = compute_splits(
         len(X), n_test, args.eval_set, train_amt=args.train_amt, seed=1337)
 
-    # --- record exactly which trials landed in each split (lightweight) ---
-    manifest_meta = {
-        "split_seed": 1337,
-        "eval_set": args.eval_set,
-        "train_amt": args.train_amt,
-        "n_total": int(len(X)),
-        "n_test": int(n_test),
-        "data_dir": args.data_dir,
-        "note": "test = realtime held-out set (last n_test rows); "
-                "fold-internal test is unused for the reported metrics",
-    }
-    write_split_manifest(os.path.join(args.out_dir, "split_manifest.json"),
-                         labels, train, val, test_day_inds, meta=manifest_meta)
-    print("wrote split_manifest.json", flush=True)
+    # --- record exactly which trials landed in each split (3 files) ---
+    mpaths = write_split_manifest(args.out_dir, labels, train, val, test_day_inds)
+    print("wrote split manifests:", ", ".join(os.path.basename(p)
+                                               for p in mpaths.values()), flush=True)
 
     # --- augmentations (notebook's tuned values) ---
     b1 = {"additive_noise_level": 0.0027354917297051813,
