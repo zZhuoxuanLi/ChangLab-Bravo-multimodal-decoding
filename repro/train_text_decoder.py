@@ -387,6 +387,73 @@ def make_decoder(lex_path, tok_path, lm_path, beam_size, lm_weight, word_score):
         sil_token="|", unk_word="<unk>")
 
 
+def compute_splits(n, n_test, eval_set, train_amt=1.0, seed=1337):
+    """Reproduce the notebook's split exactly.
+
+    Returns (train, val, test_fold, test_day) index lists:
+      - train      : training indices (after train_amt truncation)
+      - val        : validation indices (capped at 450) used for early stopping
+      - test_fold  : the fold's held-out set (capped at 450); computed but NOT
+                     used for the final evaluation (kept for fidelity)
+      - test_day   : the last n_test rows = the realtime held-out test set that
+                     the final metrics/plots are computed on
+    """
+    inds = np.arange(n)
+    test_day_inds = copy.deepcopy(inds[-n_test:])
+    off_limits = list(test_day_inds)
+    test_inds_eligible = inds
+    np.random.seed(seed)
+    np.random.shuffle(test_inds_eligible)
+    trainsets = []
+    for k in range(10):
+        te = test_inds_eligible[k * (n // 20):(k + 1) * (n // 20)]
+        te = [i for i in te if i not in off_limits]
+        val = test_inds_eligible[(k + 2) * (n // 20):(k + 3) * (n // 20)]
+        val = [i for i in val if i not in te and i not in off_limits]
+        tr = [i for i in inds if i not in list(te) + list(val) and i not in off_limits]
+        trainsets.append((tr, val, te))
+    tr, val, te = trainsets[eval_set]
+    val = val[:450]
+    te = te[:450]
+    tr = tr[:int(len(tr) * train_amt)]
+    return tr, val, te, list(test_day_inds)
+
+
+def _manifest_rows(labels, idxs):
+    rows = []
+    for i in idxs:
+        r = labels.iloc[int(i)]
+        block = r["block"]
+        try:
+            block = int(block)
+        except (ValueError, TypeError):
+            block = str(block)
+        rows.append({
+            "index": int(i),
+            "block": block,
+            "within_block_idx": int(r["trial"]),
+            "ground_truth": str(r["txt_label"]),
+        })
+    return rows
+
+
+def write_split_manifest(path, labels, train, val, test, meta=None):
+    """Write a lightweight JSON describing which trials are in each split
+    (index / block / within-block index / ground truth). Does NOT copy any
+    neural data -- it just lists what was used so splits can be verified and
+    compared across runs. Each split is sorted by index for stable diffs."""
+    manifest = {
+        "meta": meta or {},
+        "counts": {"train": len(train), "val": len(val), "test": len(test)},
+        "train": _manifest_rows(labels, sorted(train)),
+        "val": _manifest_rows(labels, sorted(val)),
+        "test": _manifest_rows(labels, sorted(test)),
+    }
+    with open(path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    return manifest
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data_dir", default="/userdata/dmoses/b3_features/zenodo")
@@ -486,21 +553,23 @@ def main():
     n_wordtarg = int(word_targets.max())
 
     # --- splits (seed 1337, identical to the notebook) ---
-    inds = np.arange(len(X))
-    test_day_inds = copy.deepcopy(inds[-n_test:])
-    off_limits = list(test_day_inds)
-    test_inds_eligible = inds
-    np.random.seed(1337)
-    np.random.shuffle(test_inds_eligible)
-    trainsets = []
-    for k in range(10):
-        te = test_inds_eligible[k * (len(inds) // 20):(k + 1) * (len(inds) // 20)]
-        te = [i for i in te if i not in off_limits]
-        val = test_inds_eligible[(k + 2) * (len(inds) // 20):(k + 3) * (len(inds) // 20)]
-        val = [i for i in val if i not in te and i not in off_limits]
-        tr = [i for i in inds if i not in list(te) + list(val) and i not in off_limits]
-        trainsets.append((tr, val, te))
-    trainsets = trainsets[args.eval_set:args.eval_set + 1]
+    train, val, test, test_day_inds = compute_splits(
+        len(X), n_test, args.eval_set, train_amt=args.train_amt, seed=1337)
+
+    # --- record exactly which trials landed in each split (lightweight) ---
+    manifest_meta = {
+        "split_seed": 1337,
+        "eval_set": args.eval_set,
+        "train_amt": args.train_amt,
+        "n_total": int(len(X)),
+        "n_test": int(n_test),
+        "data_dir": args.data_dir,
+        "note": "test = realtime held-out set (last n_test rows); "
+                "fold-internal test is unused for the reported metrics",
+    }
+    write_split_manifest(os.path.join(args.out_dir, "split_manifest.json"),
+                         labels, train, val, test_day_inds, meta=manifest_meta)
+    print("wrote split_manifest.json", flush=True)
 
     # --- augmentations (notebook's tuned values) ---
     b1 = {"additive_noise_level": 0.0027354917297051813,
@@ -525,10 +594,6 @@ def main():
                               args.beam_width, args.LM_WEIGHT, args.WORD_SCORE)
 
     # --- build the single fold's datasets ---
-    train, val, test = trainsets[0]
-    val = val[:450]
-    test = test[:450]
-    train = train[:int(len(train) * args.train_amt)]
     print(f"sizes  tr/val/test  {len(train)}/{len(val)}/{len(test)}", flush=True)
 
     def dset(idx, tf):
